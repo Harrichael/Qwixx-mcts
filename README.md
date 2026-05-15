@@ -30,6 +30,7 @@ The active player may also pair _one_ white die with _one_ colored die, and cros
 ### Game end
 
 The game ends as soon as either:
+
 - **2 rows** have been locked (by anyone), or
 - A player has taken **4 penalties**.
 
@@ -37,9 +38,9 @@ The game ends as soon as either:
 
 Each row scores by how many marks it has (locked rows count their lock as an extra mark):
 
-| Marks | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
-|------:|--:|--:|--:|--:|--:|--:|--:|--:|--:|---:|---:|---:|
-| Score | 1 | 3 | 6 |10 |15 |21 |28 |36 |45 | 55 | 66 | 78 |
+| Marks |   1 |   2 |   3 |   4 |   5 |   6 |   7 |   8 |   9 |  10 |  11 |  12 |
+| ----: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| Score |   1 |   3 |   6 |  10 |  15 |  21 |  28 |  36 |  45 |  55 |  66 |  78 |
 
 Plus −5 for each penalty. Highest total wins.
 
