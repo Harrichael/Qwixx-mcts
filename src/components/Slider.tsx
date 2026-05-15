@@ -1,6 +1,16 @@
 import { memo } from "react";
 
-const Slider = memo(({ label, desc, value, min, max, step, onChange }) => (
+interface SliderProps {
+  label: string;
+  desc: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (v: number) => void;
+}
+
+const Slider = memo(({ label, desc, value, min, max, step, onChange }: SliderProps) => (
   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
     <div style={{ minWidth: 100, fontSize: 10 }}>
       <div style={{ color: "#e2e8f0", fontWeight: 600 }}>{label}</div>

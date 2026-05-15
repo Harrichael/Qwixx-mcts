@@ -6,7 +6,8 @@
   "homepage": "https://harrichael.github.io/Qwixx-mcts/",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "tsc -b && vite build",
+    "type-check": "tsc -b --noEmit",
     "preview": "vite preview",
     "deploy": "npm run build && gh-pages -d dist",
     "format": "prettier --write .",

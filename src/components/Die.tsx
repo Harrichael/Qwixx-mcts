@@ -1,6 +1,15 @@
 import { memo } from "react";
 
-const Die = memo(({ value, bg, size = 42, spin, selected, onClick }) => (
+interface DieProps {
+  value: number;
+  bg: string;
+  size?: number;
+  spin?: boolean;
+  selected?: boolean;
+  onClick?: () => void;
+}
+
+const Die = memo(({ value, bg, size = 42, spin, selected, onClick }: DieProps) => (
   <div
     onClick={onClick}
     style={{

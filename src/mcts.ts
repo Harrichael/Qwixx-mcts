@@ -1,19 +1,35 @@
 import { COLORS, SCORE_MAP, PENALTY_PTS, rollAll } from "./constants";
 import { clone, doMark, score, isOver2, canMark, wOpts, cOpts, lastIdx, countX } from "./game";
+import type {
+  ActiveMove,
+  Dice,
+  GameState,
+  LiveStats,
+  MctsResult,
+  Move,
+  RolloutResult,
+} from "./types";
 
-function enumActive(s, d) {
-  const ws = d.w1 + d.w2,
-    wO = wOpts(s, ws),
-    combos = [];
+interface Stat {
+  v: number;
+  t: number;
+  w: number;
+  d: number;
+}
+
+function enumActive(s: GameState, d: Dice): ActiveMove[] {
+  const ws = d.w1 + d.w2;
+  const wO = wOpts(s, ws);
+  const combos: ActiveMove[] = [];
   for (const wm of wO) {
-    const aw = doMark(s, wm.color, wm.idx),
-      co = cOpts(aw, d);
+    const aw = doMark(s, wm.color, wm.idx);
+    const co = cOpts(aw, d);
     if (!co.length) combos.push({ w: wm, c: null });
     else for (const cm of co) combos.push({ w: wm, c: cm });
   }
   for (const cm of cOpts(s, d)) combos.push({ w: null, c: cm });
   combos.push({ w: null, c: null });
-  const seen = new Set();
+  const seen = new Set<string>();
   return combos.filter((m) => {
     const k = `${m.w?.color}:${m.w?.idx},${m.c?.color}:${m.c?.idx}`;
     if (seen.has(k)) return false;
@@ -21,34 +37,37 @@ function enumActive(s, d) {
     return true;
   });
 }
-function applyActive(s, m) {
-  let n = clone(s);
+
+function applyActive(s: GameState, m: ActiveMove): GameState {
+  let n = s;
   if (m.w) n = doMark(n, m.w.color, m.w.idx);
   if (m.c && canMark(n, m.c.color, m.c.idx)) n = doMark(n, m.c.color, m.c.idx);
-  if (!m.w && !m.c) n.penalties++;
+  if (!m.w && !m.c) n = { ...n, penalties: n.penalties + 1 };
   return n;
 }
-export function applyPassive(s, m) {
+
+export function applyPassive(s: GameState, m: Move | null): GameState {
   return m ? doMark(s, m.color, m.idx) : clone(s);
 }
-function maxPot(s) {
+
+function maxPot(s: GameState): number {
   let t = 0;
   COLORS.forEach((c) => {
     if (s.locked[c]) {
       t += SCORE_MAP[countX(s.marked[c]) + 1] || 0;
       return;
     }
-    const m = countX(s.marked[c]),
-      l = lastIdx(s.marked[c]),
-      remaining = l === -1 ? 11 : 10 - l,
-      best = Math.min(m + remaining, 11),
-      canLock = best >= 5;
+    const m = countX(s.marked[c]);
+    const l = lastIdx(s.marked[c]);
+    const remaining = l === -1 ? 11 : 10 - l;
+    const best = Math.min(m + remaining, 11);
+    const canLock = best >= 5;
     t += SCORE_MAP[canLock ? best + 1 : best] || 0;
   });
   return t + s.penalties * PENALTY_PTS;
 }
 
-function randActive(s, d) {
+function randActive(s: GameState, d: Dice): ActiveMove {
   const m = enumActive(s, d);
   if (m.length <= 1) return m[0] || { w: null, c: null };
   const marking = m.filter((x) => x.w || x.c);
@@ -63,7 +82,7 @@ function randActive(s, d) {
     });
     return { mv, r };
   });
-  const tot = sc.reduce((s, x) => s + x.r + 1, 0);
+  const tot = sc.reduce((acc, x) => acc + x.r + 1, 0);
   let rr = Math.random() * tot;
   for (const { mv, r } of sc) {
     rr -= r + 1;
@@ -71,7 +90,8 @@ function randActive(s, d) {
   }
   return sc[sc.length - 1].mv;
 }
-function randPassive(s, ws) {
+
+function randPassive(s: GameState, ws: number): Move | null {
   const m = wOpts(s, ws);
   if (!m.length) return null;
   if (Math.random() > 0.55) return null;
@@ -90,13 +110,13 @@ function randPassive(s, ws) {
   return Math.random() < 0.7 ? sc[0].mv : sc[Math.floor(Math.random() * sc.length)].mv;
 }
 
-function rollout(ai, opp, aiActive, maxT = 18) {
-  let a = clone(ai),
-    o = clone(opp),
-    who = aiActive;
+function rollout(ai: GameState, opp: GameState, aiActive: boolean, maxT = 18): RolloutResult {
+  let a = clone(ai);
+  let o = clone(opp);
+  let who = aiActive;
   for (let t = 0; t < maxT && !isOver2(a, o); t++) {
-    const d = rollAll(),
-      ws = d.w1 + d.w2;
+    const d = rollAll();
+    const ws = d.w1 + d.w2;
     if (who) {
       a = applyActive(a, randActive(a, d));
       if (!isOver2(a, o)) o = applyPassive(o, randPassive(o, ws));
@@ -109,11 +129,11 @@ function rollout(ai, opp, aiActive, maxT = 18) {
   return { ai: score(a), opp: score(o) };
 }
 
-function ucbSel(stats, ceil, n, C = 1.41) {
+function ucbSel(stats: Stat[], ceil: number[], n: number, C = 1.41): number {
   const deltas = stats.map((s, j) => (s.v ? Math.max(0, ceil[j] - s.t / s.v) : ceil[j]));
   const nf = 50;
-  let best = 0,
-    bu = -Infinity;
+  let best = 0;
+  let bu = -Infinity;
   for (let j = 0; j < stats.length; j++) {
     if (!stats[j].v) {
       const p = ceil[j] + 1000;
@@ -123,8 +143,8 @@ function ucbSel(stats, ceil, n, C = 1.41) {
       }
       continue;
     }
-    const avg = stats[j].t / stats[j].v,
-      us = Math.pow(1 + deltas[j] / nf, 1.5);
+    const avg = stats[j].t / stats[j].v;
+    const us = Math.pow(1 + deltas[j] / nf, 1.5);
     const u = avg + C * Math.sqrt(Math.log(n + 1) / stats[j].v) * us;
     if (u > bu) {
       bu = u;
@@ -133,9 +153,10 @@ function ucbSel(stats, ceil, n, C = 1.41) {
   }
   return best;
 }
-function bestI(stats) {
-  let b = 0,
-    ba = -Infinity;
+
+function bestI(stats: Stat[]): number {
+  let b = 0;
+  let ba = -Infinity;
   for (let j = 0; j < stats.length; j++) {
     if (!stats[j].v) continue;
     const a = stats[j].t / stats[j].v;
@@ -147,21 +168,31 @@ function bestI(stats) {
   return b;
 }
 
-export const liveStats = { wins: 0, losses: 0, draws: 0, total: 0 };
-export function resetLive() {
+export const liveStats: LiveStats = { wins: 0, losses: 0, draws: 0, total: 0 };
+
+export function resetLive(): void {
   liveStats.wins = 0;
   liveStats.losses = 0;
   liveStats.draws = 0;
   liveStats.total = 0;
 }
+
 const BATCH = 200;
 
-function mctsAsync(moves, ceil, applyFn, oppSt, aiActive, iters, C) {
+function mctsAsync(
+  moves: (Move | null)[],
+  ceil: number[],
+  applyFn: (m: Move | null) => GameState,
+  oppSt: GameState,
+  aiActive: boolean,
+  iters: number,
+  C: number
+): Promise<MctsResult> {
   resetLive();
-  return new Promise((resolve) => {
+  return new Promise<MctsResult>((resolve) => {
     if (moves.length <= 1) {
-      const move = moves[0] || null,
-        after = applyFn(move);
+      const move = moves[0] ?? null;
+      const after = applyFn(move);
       for (let i = 0; i < Math.min(iters, 200); i++) {
         const r = rollout(after, oppSt, aiActive);
         liveStats.total++;
@@ -178,35 +209,50 @@ function mctsAsync(moves, ceil, applyFn, oppSt, aiActive, iters, C) {
       });
       return;
     }
-    const stats = moves.map(() => ({ v: 0, t: 0, w: 0, d: 0 }));
+    const stats: Stat[] = moves.map(() => ({ v: 0, t: 0, w: 0, d: 0 }));
     let done = 0;
     function step() {
       const end = Math.min(done + BATCH, iters);
       for (let i = done; i < end; i++) {
-        const j = ucbSel(stats, ceil, i, C),
-          after = applyFn(moves[j]),
-          r = rollout(after, oppSt, aiActive);
+        const j = ucbSel(stats, ceil, i, C);
+        const after = applyFn(moves[j]);
+        const r = rollout(after, oppSt, aiActive);
         stats[j].t += r.ai;
         stats[j].v++;
         if (r.ai > r.opp) stats[j].w++;
         else if (r.ai === r.opp) stats[j].d++;
       }
       done = end;
-      const bi = bestI(stats),
-        s = stats[bi];
+      const bi = bestI(stats);
+      const s = stats[bi];
       liveStats.wins = s.w;
       liveStats.draws = s.d;
       liveStats.losses = s.v - s.w - s.d;
       liveStats.total = s.v;
-      if (done >= iters)
-        resolve({ move: moves[bi], wins: s.w, losses: s.v - s.w - s.d, draws: s.d, total: s.v });
-      else setTimeout(step, 0);
+      if (done >= iters) {
+        resolve({
+          move: moves[bi],
+          wins: s.w,
+          losses: s.v - s.w - s.d,
+          draws: s.d,
+          total: s.v,
+        });
+      } else {
+        setTimeout(step, 0);
+      }
     }
     step();
   });
 }
-export function mctsPassive(ai, opp, ws, iters, C) {
-  const moves = [null, ...wOpts(ai, ws)];
+
+export function mctsPassive(
+  ai: GameState,
+  opp: GameState,
+  ws: number,
+  iters: number,
+  C: number
+): Promise<MctsResult> {
+  const moves: (Move | null)[] = [null, ...wOpts(ai, ws)];
   return mctsAsync(
     moves,
     moves.map((m) => maxPot(applyPassive(ai, m))),
@@ -217,26 +263,32 @@ export function mctsPassive(ai, opp, ws, iters, C) {
     C
   );
 }
-export function mctsWhite(ai, opp, ws, iters, C) {
+
+export function mctsWhite(
+  ai: GameState,
+  opp: GameState,
+  ws: number,
+  iters: number,
+  C: number
+): Promise<MctsResult> {
   return mctsPassive(ai, opp, ws, iters, C);
 }
-export function mctsColor(ai, opp, dice, iters, C, didWhite = true) {
-  const co = cOpts(ai, dice),
-    moves = [null, ...co];
+
+export function mctsColor(
+  ai: GameState,
+  opp: GameState,
+  dice: Dice,
+  iters: number,
+  C: number,
+  didWhite = true
+): Promise<MctsResult> {
+  const co = cOpts(ai, dice);
+  const moves: (Move | null)[] = [null, ...co];
+  const skipState: GameState = didWhite ? ai : { ...ai, penalties: ai.penalties + 1 };
   return mctsAsync(
     moves,
-    moves.map((m) => {
-      if (m) return maxPot(doMark(ai, m.color, m.idx));
-      const n = clone(ai);
-      if (!didWhite) n.penalties++;
-      return maxPot(n);
-    }),
-    (m) => {
-      if (m) return doMark(ai, m.color, m.idx);
-      const n = clone(ai);
-      if (!didWhite) n.penalties++;
-      return n;
-    },
+    moves.map((m) => (m ? maxPot(doMark(ai, m.color, m.idx)) : maxPot(skipState))),
+    (m) => (m ? doMark(ai, m.color, m.idx) : skipState),
     opp,
     false,
     iters,

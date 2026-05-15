@@ -1,3 +1,8 @@
+import type { Dice, Row } from "./types";
+
+export const COLORS = ["red", "yellow", "green", "blue"] as const;
+export type Color = (typeof COLORS)[number];
+
 export const ROWS = [
   {
     color: "red",
@@ -31,12 +36,18 @@ export const ROWS = [
     text: "#1E40AF",
     accent: "#3B82F6",
   },
-];
-export const COLORS = ["red", "yellow", "green", "blue"];
-export const SCORE_MAP = [0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78];
+] as const satisfies readonly Row[];
+
+export const ROW_BY_COLOR: Record<Color, Row> = Object.fromEntries(
+  ROWS.map((r) => [r.color, r])
+) as unknown as Record<Color, Row>;
+
+export const SCORE_MAP: readonly number[] = [0, 1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 66, 78];
 export const PENALTY_PTS = -5;
-export const rollDie = () => Math.floor(Math.random() * 6) + 1;
-export const rollAll = () => ({
+
+export const rollDie = (): number => Math.floor(Math.random() * 6) + 1;
+
+export const rollAll = (): Dice => ({
   w1: rollDie(),
   w2: rollDie(),
   red: rollDie(),

@@ -1,29 +1,47 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { ROWS, SCORE_MAP, rollAll } from "./constants";
-import { blank, clone, doMark, score, isOver2, canMark, syncLocks, countX } from "./game";
+import { ROWS, ROW_BY_COLOR, SCORE_MAP, rollAll } from "./constants";
+import { blank, doMark, score, isOver2, canMark, syncLocks, countX } from "./game";
 import { liveStats, resetLive, applyPassive, mctsPassive, mctsWhite, mctsColor } from "./mcts";
+import type {
+  Color,
+  Dice,
+  GameState,
+  MctsConfig,
+  MctsResult,
+  Move,
+  Phase,
+  Player,
+  Row,
+  WinProb,
+} from "./types";
 import Die from "./components/Die";
 import Cell from "./components/Cell";
 import Slider from "./components/Slider";
 
+const PRESETS = {
+  defaults: { activeSims: 10000, colorSims: 3000, passiveSims: 4000, ucbC: 1.41 },
+  max: { activeSims: 50000, colorSims: 20000, passiveSims: 15000, ucbC: 1.2 },
+  easy: { activeSims: 1000, colorSims: 500, passiveSims: 500, ucbC: 2.0 },
+} satisfies Record<string, Omit<MctsConfig, "manual">>;
+
 export default function Qwixx() {
-  const [pSt, setPSt] = useState(blank);
-  const [aiSt, setAiSt] = useState(blank);
-  const [dice, setDice] = useState(null);
-  const [activePlayer, setActivePlayer] = useState("human");
-  const [phase, setPhase] = useState("roll");
+  const [pSt, setPSt] = useState<GameState>(blank);
+  const [aiSt, setAiSt] = useState<GameState>(blank);
+  const [dice, setDice] = useState<Dice | null>(null);
+  const [activePlayer, setActivePlayer] = useState<Player>("human");
+  const [phase, setPhase] = useState<Phase>("roll");
   const [usedW, setUsedW] = useState(false);
   const [usedC, setUsedC] = useState(false);
   const [rolling, setRolling] = useState(false);
-  const [rollAnim, setRollAnim] = useState(null);
+  const [rollAnim, setRollAnim] = useState<Dice | null>(null);
   const [over, setOver] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showCfg, setShowCfg] = useState(false);
-  const [aiHL, setAiHL] = useState(null);
-  const [aiLog, setAiLog] = useState([]);
+  const [aiHL, setAiHL] = useState<Move | null>(null);
+  const [aiLog, setAiLog] = useState<string[]>([]);
   const [turn, setTurn] = useState(0);
-  const [winProb, setWinProb] = useState(null);
-  const [cfg, setCfg] = useState({
+  const [winProb, setWinProb] = useState<WinProb | null>(null);
+  const [cfg, setCfg] = useState<MctsConfig>({
     activeSims: 10000,
     colorSims: 3000,
     passiveSims: 4000,
@@ -38,13 +56,13 @@ export default function Qwixx() {
     aSc = score(aiSt);
   const isHA = activePlayer === "human";
   const dd = rollAnim || dice;
-  const aiDiceR = useRef(null),
-    aiMidR = useRef(null),
-    hasStarted = useRef(false);
-  const aiPendingR = useRef(null),
-    aiResultR = useRef(null);
+  const aiDiceR = useRef<Dice | null>(null);
+  const aiMidR = useRef<GameState | null>(null);
+  const hasStarted = useRef<boolean>(false);
+  const aiPendingR = useRef<Promise<MctsResult> | null>(null);
+  const aiResultR = useRef<MctsResult | null>(null);
 
-  const addLog = (t, msg) => setAiLog((p) => [...p.slice(-7), `T${t}: ${msg}`]);
+  const addLog = (t: number, msg: string) => setAiLog((p) => [...p.slice(-7), `T${t}: ${msg}`]);
   const endGame = () => {
     setOver(true);
     setPhase("done");
@@ -69,7 +87,7 @@ export default function Qwixx() {
     return () => clearInterval(iv);
   }, []);
 
-  const nextTurn = useCallback((p, a) => {
+  const nextTurn = useCallback((p: GameState, a: GameState) => {
     if (isOver2(p, a)) {
       setOver(true);
       setPhase("done");
@@ -88,32 +106,27 @@ export default function Qwixx() {
   const manual = cfg.manual;
   // In manual mode: white options still highlighted (sum is obvious), color options still highlighted
   // The only difference: no color preview during white phase
-  const isWO = (c, i) =>
-    phase === "p_white" &&
-    dice &&
-    ROWS.find((r) => r.color === c).numbers[i] === ws &&
-    canMark(pSt, c, i);
-  const isCO = (c, i) => {
+  const isWO = (c: Color, i: number): boolean =>
+    phase === "p_white" && !!dice && ROW_BY_COLOR[c].numbers[i] === ws && canMark(pSt, c, i);
+  const isCO = (c: Color, i: number): boolean => {
     if (phase !== "p_color" || !dice) return false;
-    const row = ROWS.find((r) => r.color === c),
-      su = [dice.w1 + dice[c], dice.w2 + dice[c]];
-    return su.includes(row.numbers[i]) && canMark(pSt, c, i);
+    const su = [dice.w1 + dice[c], dice.w2 + dice[c]];
+    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(pSt, c, i);
   };
-  const isPO = (c, i) =>
+  const isPO = (c: Color, i: number): boolean =>
     phase === "p_passive_white" &&
-    dice &&
-    ROWS.find((r) => r.color === c).numbers[i] === ws &&
+    !!dice &&
+    ROW_BY_COLOR[c].numbers[i] === ws &&
     canMark(pSt, c, i);
   // Color preview only in non-manual mode
-  const isCP = (c, i) => {
+  const isCP = (c: Color, i: number): boolean => {
     if (manual || phase !== "p_white" || !dice) return false;
-    const row = ROWS.find((r) => r.color === c),
-      su = [dice.w1 + dice[c], dice.w2 + dice[c]];
-    return su.includes(row.numbers[i]) && canMark(pSt, c, i);
+    const su = [dice.w1 + dice[c], dice.w2 + dice[c]];
+    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(pSt, c, i);
   };
 
   // ── AI background ──
-  const startAI = (fn) => {
+  const startAI = (fn: () => Promise<MctsResult>) => {
     aiResultR.current = null;
     const p = fn();
     aiPendingR.current = p;
@@ -122,13 +135,19 @@ export default function Qwixx() {
     });
   };
 
+  type RevealResult = { p: GameState; ai: GameState };
   // Reveal AI move: show highlight on OLD state, wait, then commit
   const revealAI = useCallback(
-    async (latestP, latestAI, prefix, thenFn) => {
+    async (
+      latestP: GameState,
+      latestAI: GameState,
+      prefix: string,
+      thenFn?: (sp: GameState, nai: GameState) => RevealResult
+    ): Promise<RevealResult | null> => {
       let result = aiResultR.current;
       if (!result) {
         setPhase("ai_thinking");
-        result = await aiPendingR.current;
+        result = await aiPendingR.current!;
       }
       aiPendingR.current = null;
       aiResultR.current = null;
@@ -169,7 +188,7 @@ export default function Qwixx() {
   );
 
   const startHuman = useCallback(
-    (fd) => {
+    (fd: Dice) => {
       const s = cfgR.current;
       startAI(() => mctsPassive(aiSt, pSt, fd.w1 + fd.w2, s.passiveSims, s.ucbC));
       setPhase("p_white");
@@ -178,7 +197,7 @@ export default function Qwixx() {
   );
 
   const startAITurn = useCallback(
-    (fd) => {
+    (fd: Dice) => {
       aiDiceR.current = fd;
       const s = cfgR.current;
       startAI(() => mctsWhite(aiSt, pSt, fd.w1 + fd.w2, s.activeSims, s.ucbC));
@@ -188,10 +207,10 @@ export default function Qwixx() {
   );
 
   const doAIColor = useCallback(
-    async (latestP) => {
-      const s = cfgR.current,
-        midAI = aiMidR.current || aiSt,
-        fd = aiDiceR.current;
+    async (latestP: GameState) => {
+      const s = cfgR.current;
+      const midAI = aiMidR.current || aiSt;
+      const fd = aiDiceR.current;
       if (!fd) {
         nextTurn(latestP, midAI);
         return;
@@ -212,8 +231,7 @@ export default function Qwixx() {
         setAiHL(null);
         setAiSt(finalAI);
       } else if (!didW) {
-        finalAI = clone(midAI);
-        finalAI.penalties++;
+        finalAI = { ...midAI, penalties: midAI.penalties + 1 };
         addLog(turn + 1, "active: skip(−5)");
         setAiSt(finalAI);
       }
@@ -236,7 +254,7 @@ export default function Qwixx() {
   );
 
   const finishPassive = useCallback(
-    async (latestP) => {
+    async (latestP: GameState) => {
       const res = await revealAI(latestP, aiSt, "active(w)");
       if (!res) return;
       aiMidR.current = res.ai;
@@ -245,7 +263,7 @@ export default function Qwixx() {
     [aiSt, revealAI, doAIColor]
   );
 
-  const handleMark = (c, i) => {
+  const handleMark = (c: Color, i: number) => {
     if (over) return;
     if (isWO(c, i)) {
       const ns = doMark(pSt, c, i),
@@ -290,8 +308,7 @@ export default function Qwixx() {
       return { p: sp, ai: nai };
     });
   const skipC = () => {
-    let ns = clone(pSt);
-    if (!usedW && !usedC) ns.penalties++;
+    const ns: GameState = !usedW && !usedC ? { ...pSt, penalties: pSt.penalties + 1 } : pSt;
     setPSt(ns);
     if (isOver2(ns, aiSt)) {
       endGame();
@@ -368,15 +385,19 @@ export default function Qwixx() {
         return { text: "🤖 AI thinking...", color: "#c4b5fd" };
       case "ai_show":
         return { text: "🤖 AI played!", color: "#c4b5fd" };
-      default:
+      case "done":
         return { text: "", color: "#fff" };
+      default: {
+        const _exhaustive: never = phase;
+        return _exhaustive;
+      }
     }
   })();
 
   /* ═══════════════════════════════════════════
      RENDER — Row and Board inline but using memo'd Cell
      ═══════════════════════════════════════════ */
-  const renderRow = (row, state, isAI) => {
+  const renderRow = (row: Row, state: GameState, isAI: boolean) => {
     const lk = state.locked[row.color];
     return (
       <div
@@ -460,7 +481,7 @@ export default function Qwixx() {
     );
   };
 
-  const renderBoard = (state, label, isAI, active) => {
+  const renderBoard = (state: GameState, label: string, isAI: boolean, active: boolean) => {
     const ac = isAI ? "#8b5cf6" : "#22c55e",
       al = isAI ? "rgba(139,92,246," : "rgba(34,197,94,";
     return (
@@ -741,9 +762,7 @@ export default function Qwixx() {
           />
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
             <button
-              onClick={() =>
-                setCfg({ activeSims: 10000, colorSims: 3000, passiveSims: 4000, ucbC: 1.41 })
-              }
+              onClick={() => setCfg({ ...cfg, ...PRESETS.defaults })}
               style={{
                 background: "rgba(255,255,255,0.06)",
                 border: "1px solid rgba(255,255,255,0.1)",
@@ -758,9 +777,7 @@ export default function Qwixx() {
               Defaults
             </button>
             <button
-              onClick={() =>
-                setCfg({ activeSims: 50000, colorSims: 20000, passiveSims: 15000, ucbC: 1.2 })
-              }
+              onClick={() => setCfg({ ...cfg, ...PRESETS.max })}
               style={{
                 background: "rgba(239,68,68,0.12)",
                 border: "1px solid rgba(239,68,68,0.2)",
@@ -775,9 +792,7 @@ export default function Qwixx() {
               🔥 Max
             </button>
             <button
-              onClick={() =>
-                setCfg({ activeSims: 1000, colorSims: 500, passiveSims: 500, ucbC: 2.0 })
-              }
+              onClick={() => setCfg({ ...cfg, ...PRESETS.easy })}
               style={{
                 background: "rgba(34,197,94,0.12)",
                 border: "1px solid rgba(34,197,94,0.2)",
