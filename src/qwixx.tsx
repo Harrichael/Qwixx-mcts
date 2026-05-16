@@ -679,7 +679,9 @@ export default function Qwixx() {
             <span style={{ color: "#c4b5fd", fontWeight: 700, fontSize: 12 }}>
               ⚙️ MCTS Settings
             </span>
-            <span style={{ color: "#64748b", fontSize: 9, fontFamily: "monospace" }}>v0.2</span>
+            <span style={{ color: "#64748b", fontSize: 9, fontFamily: "monospace" }}>
+              v{__APP_VERSION__}
+            </span>
           </div>
           <div
             style={{
