@@ -30,7 +30,7 @@ export interface ActiveMove {
 
 export interface RolloutResult {
   ai: number;
-  opp: number;
+  opponents: number[];
 }
 
 export interface MctsResult {
@@ -59,10 +59,19 @@ export type Phase =
 
 export type Player = "human" | "ai";
 
+// activeIndex 0 = human, 1..N = AI players[index - 1]
+export type ActiveIndex = number;
+
 export interface WinProb {
   aiWin: number;
   draw: number;
   humanWin: number;
+}
+
+export interface AiHighlight {
+  aiIndex: number;
+  color: Color;
+  idx: number;
 }
 
 export interface MctsConfig {
@@ -71,4 +80,5 @@ export interface MctsConfig {
   passiveSims: number;
   ucbC: number;
   manual: boolean;
+  numAI: number;
 }

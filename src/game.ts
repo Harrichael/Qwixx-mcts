@@ -57,6 +57,35 @@ export function isOver2(a: GameState, b: GameState): boolean {
   return COLORS.filter((c) => a.locked[c] || b.locked[c]).length >= 2;
 }
 
+export function isGameOver(allPlayerStates: readonly GameState[]): boolean {
+  if (allPlayerStates.some((s) => s.penalties >= 4)) return true;
+  return COLORS.filter((c) => allPlayerStates.some((s) => s.locked[c])).length >= 2;
+}
+
+// Propagate any color locks present in any state to every state.
+export function syncLocksAll(allPlayerStates: readonly GameState[]): GameState[] {
+  const lockedAny: Record<Color, boolean> = {} as Record<Color, boolean>;
+  let anyLock = false;
+  COLORS.forEach((c) => {
+    const isLocked = allPlayerStates.some((s) => s.locked[c]);
+    lockedAny[c] = isLocked;
+    if (isLocked) anyLock = true;
+  });
+  if (!anyLock) return [...allPlayerStates];
+  return allPlayerStates.map((s) => {
+    let changed = false;
+    COLORS.forEach((c) => {
+      if (lockedAny[c] && !s.locked[c]) changed = true;
+    });
+    if (!changed) return s;
+    const newLocked = { ...s.locked };
+    COLORS.forEach((c) => {
+      if (lockedAny[c]) newLocked[c] = true;
+    });
+    return { ...s, locked: newLocked };
+  });
+}
+
 export function wOpts(s: GameState, ws: number): Move[] {
   const o: Move[] = [];
   COLORS.forEach((c) => {

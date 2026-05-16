@@ -1,5 +1,5 @@
 import { COLORS, SCORE_MAP, PENALTY_PTS, rollAll } from "./constants";
-import { clone, doMark, score, isOver2, canMark, wOpts, cOpts, lastIdx, countX } from "./game";
+import { clone, doMark, score, isGameOver, canMark, wOpts, cOpts, lastIdx, countX } from "./game";
 import type {
   ActiveMove,
   Dice,
@@ -110,23 +110,45 @@ function randPassive(s: GameState, ws: number): Move | null {
   return Math.random() < 0.7 ? sc[0].mv : sc[Math.floor(Math.random() * sc.length)].mv;
 }
 
-function rollout(ai: GameState, opp: GameState, aiActive: boolean, maxT = 18): RolloutResult {
-  let a = clone(ai);
-  let o = clone(opp);
-  let who = aiActive;
-  for (let t = 0; t < maxT && !isOver2(a, o); t++) {
+// firstActiveIdx: 0 = AI ("me"), 1..N = opponents[firstActiveIdx - 1]
+function rollout(
+  ai: GameState,
+  opponents: readonly GameState[],
+  firstActiveIdx: number,
+  maxT = 18
+): RolloutResult {
+  let me = clone(ai);
+  const opps = opponents.map(clone);
+  const totalPlayers = 1 + opps.length;
+  let activeIdx = firstActiveIdx % totalPlayers;
+
+  const allStates = (): GameState[] => [me, ...opps];
+
+  for (let t = 0; t < maxT && !isGameOver(allStates()); t++) {
     const d = rollAll();
     const ws = d.w1 + d.w2;
-    if (who) {
-      a = applyActive(a, randActive(a, d));
-      if (!isOver2(a, o)) o = applyPassive(o, randPassive(o, ws));
+
+    if (activeIdx === 0) {
+      me = applyActive(me, randActive(me, d));
+      for (let i = 0; i < opps.length; i++) {
+        if (isGameOver(allStates())) break;
+        opps[i] = applyPassive(opps[i], randPassive(opps[i], ws));
+      }
     } else {
-      o = applyActive(o, randActive(o, d));
-      if (!isOver2(a, o)) a = applyPassive(a, randPassive(a, ws));
+      const oppIdx = activeIdx - 1;
+      opps[oppIdx] = applyActive(opps[oppIdx], randActive(opps[oppIdx], d));
+      if (!isGameOver(allStates())) {
+        me = applyPassive(me, randPassive(me, ws));
+      }
+      for (let i = 0; i < opps.length; i++) {
+        if (i === oppIdx) continue;
+        if (isGameOver(allStates())) break;
+        opps[i] = applyPassive(opps[i], randPassive(opps[i], ws));
+      }
     }
-    who = !who;
+    activeIdx = (activeIdx + 1) % totalPlayers;
   }
-  return { ai: score(a), opp: score(o) };
+  return { ai: score(me), opponents: opps.map(score) };
 }
 
 function ucbSel(stats: Stat[], ceil: number[], n: number, C = 1.41): number {
@@ -177,14 +199,25 @@ export function resetLive(): void {
   liveStats.total = 0;
 }
 
+// Win = AI strictly beats every opponent.
+// Draw = AI ties for top (>= every opponent, == at least one).
+// Loss = some opponent beats AI.
+function classifyOutcome(myScore: number, oppScores: number[]): "win" | "draw" | "loss" {
+  let maxOpp = -Infinity;
+  for (const s of oppScores) if (s > maxOpp) maxOpp = s;
+  if (myScore > maxOpp) return "win";
+  if (myScore === maxOpp) return "draw";
+  return "loss";
+}
+
 const BATCH = 200;
 
 function mctsAsync(
   moves: (Move | null)[],
   ceil: number[],
   applyFn: (m: Move | null) => GameState,
-  oppSt: GameState,
-  aiActive: boolean,
+  opponents: readonly GameState[],
+  firstActiveIdx: number,
   iters: number,
   C: number
 ): Promise<MctsResult> {
@@ -194,10 +227,11 @@ function mctsAsync(
       const move = moves[0] ?? null;
       const after = applyFn(move);
       for (let i = 0; i < Math.min(iters, 200); i++) {
-        const r = rollout(after, oppSt, aiActive);
+        const r = rollout(after, opponents, firstActiveIdx);
         liveStats.total++;
-        if (r.ai > r.opp) liveStats.wins++;
-        else if (r.ai === r.opp) liveStats.draws++;
+        const outcome = classifyOutcome(r.ai, r.opponents);
+        if (outcome === "win") liveStats.wins++;
+        else if (outcome === "draw") liveStats.draws++;
         else liveStats.losses++;
       }
       resolve({
@@ -216,11 +250,12 @@ function mctsAsync(
       for (let i = done; i < end; i++) {
         const j = ucbSel(stats, ceil, i, C);
         const after = applyFn(moves[j]);
-        const r = rollout(after, oppSt, aiActive);
+        const r = rollout(after, opponents, firstActiveIdx);
         stats[j].t += r.ai;
         stats[j].v++;
-        if (r.ai > r.opp) stats[j].w++;
-        else if (r.ai === r.opp) stats[j].d++;
+        const outcome = classifyOutcome(r.ai, r.opponents);
+        if (outcome === "win") stats[j].w++;
+        else if (outcome === "draw") stats[j].d++;
       }
       done = end;
       const bi = bestI(stats);
@@ -247,7 +282,7 @@ function mctsAsync(
 
 export function mctsPassive(
   ai: GameState,
-  opp: GameState,
+  opponents: readonly GameState[],
   ws: number,
   iters: number,
   C: number
@@ -257,8 +292,8 @@ export function mctsPassive(
     moves,
     moves.map((m) => maxPot(applyPassive(ai, m))),
     (m) => applyPassive(ai, m),
-    opp,
-    true,
+    opponents,
+    0,
     iters,
     C
   );
@@ -266,17 +301,17 @@ export function mctsPassive(
 
 export function mctsWhite(
   ai: GameState,
-  opp: GameState,
+  opponents: readonly GameState[],
   ws: number,
   iters: number,
   C: number
 ): Promise<MctsResult> {
-  return mctsPassive(ai, opp, ws, iters, C);
+  return mctsPassive(ai, opponents, ws, iters, C);
 }
 
 export function mctsColor(
   ai: GameState,
-  opp: GameState,
+  opponents: readonly GameState[],
   dice: Dice,
   iters: number,
   C: number,
@@ -289,8 +324,8 @@ export function mctsColor(
     moves,
     moves.map((m) => (m ? maxPot(doMark(ai, m.color, m.idx)) : maxPot(skipState))),
     (m) => (m ? doMark(ai, m.color, m.idx) : skipState),
-    opp,
-    false,
+    opponents,
+    1,
     iters,
     C
   );

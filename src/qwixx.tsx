@@ -1,6 +1,6 @@
-import { useState, useCallback, useEffect, useRef } from "react";
-import { ROWS, ROW_BY_COLOR, SCORE_MAP, rollAll } from "./constants";
-import { blank, doMark, score, isOver2, canMark, syncLocks, countX } from "./game";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { ROW_BY_COLOR, rollAll } from "./constants";
+import { blank, doMark, score, isGameOver, canMark, syncLocksAll } from "./game";
 import { liveStats, resetLive, applyPassive, mctsPassive, mctsWhite, mctsColor } from "./mcts";
 import type {
   Color,
@@ -8,27 +8,40 @@ import type {
   GameState,
   MctsConfig,
   MctsResult,
-  Move,
   Phase,
-  Player,
-  Row,
   WinProb,
 } from "./types";
 import Die from "./components/Die";
-import Cell from "./components/Cell";
-import Slider from "./components/Slider";
+import Board from "./components/Board";
+import RulesPanel from "./components/RulesPanel";
+import MctsSettingsPanel from "./components/MctsSettingsPanel";
+import AiLog from "./components/AiLog";
+import GameOverBanner from "./components/GameOverBanner";
+import ScoreBar from "./components/ScoreBar";
+import WinProbBar from "./components/WinProbBar";
 
-const PRESETS = {
-  defaults: { activeSims: 10000, colorSims: 3000, passiveSims: 4000, ucbC: 1.41 },
-  max: { activeSims: 50000, colorSims: 20000, passiveSims: 15000, ucbC: 1.2 },
-  easy: { activeSims: 1000, colorSims: 500, passiveSims: 500, ucbC: 2.0 },
-} satisfies Record<string, Omit<MctsConfig, "manual">>;
+const DEFAULT_CFG: MctsConfig = {
+  activeSims: 10000,
+  colorSims: 3000,
+  passiveSims: 4000,
+  ucbC: 1.41,
+  manual: false,
+  numAI: 1,
+};
+
+const aiLabel = (idx: number, total: number): string => (total === 1 ? "MCTS AI" : `AI ${idx + 1}`);
 
 export default function Qwixx() {
-  const [pSt, setPSt] = useState<GameState>(blank);
-  const [aiSt, setAiSt] = useState<GameState>(blank);
+  const [cfg, setCfg] = useState<MctsConfig>(DEFAULT_CFG);
+  const cfgR = useRef(cfg);
+  cfgR.current = cfg;
+
+  // Game state: index 0 = human, 1..N = AI[i-1]
+  const [humanState, setHumanState] = useState<GameState>(blank);
+  const [aiStates, setAiStates] = useState<GameState[]>(() => Array.from({ length: cfg.numAI }, blank));
+
   const [dice, setDice] = useState<Dice | null>(null);
-  const [activePlayer, setActivePlayer] = useState<Player>("human");
+  const [activeIdx, setActiveIdx] = useState<number>(0);
   const [phase, setPhase] = useState<Phase>("roll");
   const [usedW, setUsedW] = useState(false);
   const [usedC, setUsedC] = useState(false);
@@ -37,30 +50,36 @@ export default function Qwixx() {
   const [over, setOver] = useState(false);
   const [showRules, setShowRules] = useState(false);
   const [showCfg, setShowCfg] = useState(false);
-  const [aiHL, setAiHL] = useState<Move | null>(null);
+  const [aiHL, setAiHL] = useState<{ aiIndex: number; color: Color; idx: number } | null>(null);
   const [aiLog, setAiLog] = useState<string[]>([]);
   const [turn, setTurn] = useState(0);
   const [winProb, setWinProb] = useState<WinProb | null>(null);
-  const [cfg, setCfg] = useState<MctsConfig>({
-    activeSims: 10000,
-    colorSims: 3000,
-    passiveSims: 4000,
-    ucbC: 1.41,
-    manual: false,
-  });
-  const cfgR = useRef(cfg);
-  cfgR.current = cfg;
 
+  const numAI = aiStates.length;
+  const totalPlayers = 1 + numAI;
+  const isHumanActive = activeIdx === 0;
+  const activeAiIdx = isHumanActive ? -1 : activeIdx - 1;
   const ws = dice ? dice.w1 + dice.w2 : null;
-  const pSc = score(pSt),
-    aSc = score(aiSt);
-  const isHA = activePlayer === "human";
-  const dd = rollAnim || dice;
-  const aiDiceR = useRef<Dice | null>(null);
-  const aiMidR = useRef<GameState | null>(null);
+  const humanScore = score(humanState);
+  const aiScores = useMemo(() => aiStates.map(score), [aiStates]);
+  const leadingAiScore = aiScores.length ? Math.max(...aiScores) : 0;
+  const displayedDice = rollAnim || dice;
+
+  // Refs: per-AI pending MCTS computation + result
+  const aiPendingR = useRef<(Promise<MctsResult> | null)[]>([]);
+  const aiResultR = useRef<(MctsResult | null)[]>([]);
+  const activeAiDiceR = useRef<Dice | null>(null);
+  const activeAiMidR = useRef<GameState | null>(null);
+  const activeAiPlayedWhiteR = useRef<boolean>(false);
   const hasStarted = useRef<boolean>(false);
-  const aiPendingR = useRef<Promise<MctsResult> | null>(null);
-  const aiResultR = useRef<MctsResult | null>(null);
+
+  // Keep MCTS ref arrays sized to numAI
+  useEffect(() => {
+    while (aiPendingR.current.length < numAI) aiPendingR.current.push(null);
+    while (aiResultR.current.length < numAI) aiResultR.current.push(null);
+    aiPendingR.current.length = numAI;
+    aiResultR.current.length = numAI;
+  }, [numAI]);
 
   const addLog = (t: number, msg: string) => setAiLog((p) => [...p.slice(-7), `T${t}: ${msg}`]);
   const endGame = () => {
@@ -68,7 +87,7 @@ export default function Qwixx() {
     setPhase("done");
   };
 
-  // ── Poll liveStats ──
+  // ── Poll liveStats — most-recently-running MCTS feeds the winProb bar ──
   const lastProbRef = useRef("");
   useEffect(() => {
     const iv = setInterval(() => {
@@ -87,236 +106,362 @@ export default function Qwixx() {
     return () => clearInterval(iv);
   }, []);
 
-  const nextTurn = useCallback((p: GameState, a: GameState) => {
-    if (isOver2(p, a)) {
-      setOver(true);
-      setPhase("done");
-      return;
-    }
-    setActivePlayer((prev) => (prev === "human" ? "ai" : "human"));
-    setDice(null);
-    setAiHL(null);
-    setPhase("roll");
-    setTurn((t) => t + 1);
-    setUsedW(false);
-    setUsedC(false);
-  }, []);
+  const nextTurn = useCallback(
+    (humanNext: GameState, aiStatesNext: GameState[]) => {
+      if (isGameOver([humanNext, ...aiStatesNext])) {
+        setOver(true);
+        setPhase("done");
+        return;
+      }
+      setActiveIdx((prev) => (prev + 1) % totalPlayers);
+      setDice(null);
+      setAiHL(null);
+      setPhase("roll");
+      setTurn((t) => t + 1);
+      setUsedW(false);
+      setUsedC(false);
+    },
+    [totalPlayers]
+  );
 
-  // ── Option checks ──
+  // ── Human cell-state predicates ──
   const manual = cfg.manual;
-  // In manual mode: white options still highlighted (sum is obvious), color options still highlighted
-  // The only difference: no color preview during white phase
   const isWO = (c: Color, i: number): boolean =>
-    phase === "p_white" && !!dice && ROW_BY_COLOR[c].numbers[i] === ws && canMark(pSt, c, i);
+    phase === "p_white" && !!dice && ROW_BY_COLOR[c].numbers[i] === ws && canMark(humanState, c, i);
   const isCO = (c: Color, i: number): boolean => {
     if (phase !== "p_color" || !dice) return false;
     const su = [dice.w1 + dice[c], dice.w2 + dice[c]];
-    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(pSt, c, i);
+    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(humanState, c, i);
   };
   const isPO = (c: Color, i: number): boolean =>
     phase === "p_passive_white" &&
     !!dice &&
     ROW_BY_COLOR[c].numbers[i] === ws &&
-    canMark(pSt, c, i);
-  // Color preview only in non-manual mode
+    canMark(humanState, c, i);
   const isCP = (c: Color, i: number): boolean => {
     if (manual || phase !== "p_white" || !dice) return false;
     const su = [dice.w1 + dice[c], dice.w2 + dice[c]];
-    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(pSt, c, i);
+    return su.includes(ROW_BY_COLOR[c].numbers[i]) && canMark(humanState, c, i);
   };
 
-  // ── AI background ──
-  const startAI = (fn: () => Promise<MctsResult>) => {
-    aiResultR.current = null;
+  const humanIsOption = (c: Color, i: number) => isWO(c, i) || isCO(c, i) || isPO(c, i);
+  const humanIsPreview = (c: Color, i: number) => isCP(c, i);
+
+  // ── Spawn an MCTS computation for a specific AI; store its promise + eventual result ──
+  const startAi = (aiIndex: number, fn: () => Promise<MctsResult>) => {
+    aiResultR.current[aiIndex] = null;
     const p = fn();
-    aiPendingR.current = p;
+    aiPendingR.current[aiIndex] = p;
     p.then((r) => {
-      aiResultR.current = r;
+      aiResultR.current[aiIndex] = r;
     });
   };
 
-  type RevealResult = { p: GameState; ai: GameState };
-  // Reveal AI move: show highlight on OLD state, wait, then commit
-  const revealAI = useCallback(
+  // Opponents list for AI[aiIndex] = everyone else (human + other AIs)
+  const opponentsFor = (aiIndex: number, hSt: GameState, aSts: GameState[]): GameState[] => {
+    const opps: GameState[] = [hSt];
+    aSts.forEach((s, i) => {
+      if (i !== aiIndex) opps.push(s);
+    });
+    return opps;
+  };
+
+  // ── Reveal one AI's passive move (used when AI is non-active) ──
+  type RevealResult = { human: GameState; ais: GameState[] };
+  const revealPassiveAi = useCallback(
     async (
-      latestP: GameState,
-      latestAI: GameState,
-      prefix: string,
-      thenFn?: (sp: GameState, nai: GameState) => RevealResult
+      aiIndex: number,
+      latestHuman: GameState,
+      latestAis: GameState[],
+      prefix: string
     ): Promise<RevealResult | null> => {
-      let result = aiResultR.current;
+      let result = aiResultR.current[aiIndex];
       if (!result) {
         setPhase("ai_thinking");
-        result = await aiPendingR.current!;
+        result = await aiPendingR.current[aiIndex]!;
       }
-      aiPendingR.current = null;
-      aiResultR.current = null;
+      aiPendingR.current[aiIndex] = null;
+      aiResultR.current[aiIndex] = null;
       const move = result.move;
-      const newAI = move ? applyPassive(latestAI, move) : latestAI;
+      const newAi = move ? applyPassive(latestAis[aiIndex], move) : latestAis[aiIndex];
 
       if (move) {
-        const r = ROWS.find((x) => x.color === move.color);
-        addLog(turn + 1, `${prefix}: ${r.numbers[move.idx]} ${move.color}`);
-        // Phase 1: highlight on OLD board (cell not yet marked)
-        setAiHL({ color: move.color, idx: move.idx });
+        const r = ROW_BY_COLOR[move.color];
+        addLog(turn + 1, `${aiLabel(aiIndex, numAI)} ${prefix}: ${r.numbers[move.idx]} ${move.color}`);
+        setAiHL({ aiIndex, color: move.color, idx: move.idx });
         setPhase("ai_show");
         await new Promise((r) => setTimeout(r, 800));
-        // Phase 2: commit mark + clear highlight in one batch
         setAiHL(null);
-        setAiSt(newAI);
+        const merged = [...latestAis];
+        merged[aiIndex] = newAi;
+        setAiStates(merged);
+        latestAis = merged;
       } else {
-        addLog(turn + 1, `${prefix}: skip`);
+        addLog(turn + 1, `${aiLabel(aiIndex, numAI)} ${prefix}: skip`);
       }
 
-      // Sync locks + win prob (no extra setAiSt call)
-      const sp = syncLocks(newAI, latestP);
-      if (sp !== latestP) setPSt(sp);
+      // Sync locks across everyone
+      const synced = syncLocksAll([latestHuman, ...latestAis]);
+      const newHuman = synced[0];
+      const newAis = synced.slice(1);
+      if (newHuman !== latestHuman) setHumanState(newHuman);
+      if (newAis.some((s, i) => s !== latestAis[i])) setAiStates(newAis);
       if (result.total > 0)
         setWinProb({
           aiWin: result.wins / result.total,
           draw: result.draws / result.total,
           humanWin: result.losses / result.total,
         });
-      if (isOver2(sp, newAI)) {
+      if (isGameOver([newHuman, ...newAis])) {
         endGame();
         return null;
       }
-      if (thenFn) return thenFn(sp, newAI);
-      return { p: sp, ai: newAI };
+      return { human: newHuman, ais: newAis };
     },
-    [turn]
+    [turn, numAI]
   );
 
-  const startHuman = useCallback(
+  // Reveal passives for every AI in `passiveAis` sequentially.
+  const revealPassivesSequentially = useCallback(
+    async (
+      passiveAis: number[],
+      startHuman: GameState,
+      startAis: GameState[]
+    ): Promise<RevealResult | null> => {
+      let curHuman = startHuman;
+      let curAis = startAis;
+      for (const aiIndex of passiveAis) {
+        const res = await revealPassiveAi(aiIndex, curHuman, curAis, "passive");
+        if (!res) return null;
+        curHuman = res.human;
+        curAis = res.ais;
+      }
+      return { human: curHuman, ais: curAis };
+    },
+    [revealPassiveAi]
+  );
+
+  // ── Kick off MCTS for everyone non-active at the start of a roll ──
+  const startHumanTurnMcts = useCallback(
     (fd: Dice) => {
       const s = cfgR.current;
-      startAI(() => mctsPassive(aiSt, pSt, fd.w1 + fd.w2, s.passiveSims, s.ucbC));
+      // Every AI computes its passive move
+      aiStates.forEach((aiSt, i) => {
+        const opps = opponentsFor(i, humanState, aiStates);
+        startAi(i, () => mctsPassive(aiSt, opps, fd.w1 + fd.w2, s.passiveSims, s.ucbC));
+      });
       setPhase("p_white");
     },
-    [aiSt, pSt]
+    [aiStates, humanState]
   );
 
-  const startAITurn = useCallback(
-    (fd: Dice) => {
-      aiDiceR.current = fd;
+  const startAiTurnMcts = useCallback(
+    (fd: Dice, activeAi: number) => {
+      activeAiDiceR.current = fd;
+      activeAiMidR.current = null;
+      activeAiPlayedWhiteR.current = false;
       const s = cfgR.current;
-      startAI(() => mctsWhite(aiSt, pSt, fd.w1 + fd.w2, s.activeSims, s.ucbC));
+      const activeOpps = opponentsFor(activeAi, humanState, aiStates);
+      startAi(activeAi, () => mctsWhite(aiStates[activeAi], activeOpps, fd.w1 + fd.w2, s.activeSims, s.ucbC));
+      // Other AIs compute passive
+      aiStates.forEach((aiSt, i) => {
+        if (i === activeAi) return;
+        const opps = opponentsFor(i, humanState, aiStates);
+        startAi(i, () => mctsPassive(aiSt, opps, fd.w1 + fd.w2, s.passiveSims, s.ucbC));
+      });
       setPhase("p_passive_white");
     },
-    [aiSt, pSt]
+    [aiStates, humanState]
   );
 
-  const doAIColor = useCallback(
-    async (latestP: GameState) => {
-      const s = cfgR.current;
-      const midAI = aiMidR.current || aiSt;
-      const fd = aiDiceR.current;
-      if (!fd) {
-        nextTurn(latestP, midAI);
-        return;
+  // ── Reveal active AI's white move (no animation skip for now) ──
+  const revealActiveAiWhite = useCallback(
+    async (
+      activeAi: number,
+      latestHuman: GameState,
+      latestAis: GameState[]
+    ): Promise<RevealResult | null> => {
+      let result = aiResultR.current[activeAi];
+      if (!result) {
+        setPhase("ai_thinking");
+        result = await aiPendingR.current[activeAi]!;
       }
-      setPhase("ai_thinking");
-      const didW = midAI !== aiSt;
-      const result = await mctsColor(midAI, latestP, fd, s.colorSims, s.ucbC, didW);
+      aiPendingR.current[activeAi] = null;
+      aiResultR.current[activeAi] = null;
       const move = result.move;
-      let finalAI = midAI;
+      activeAiPlayedWhiteR.current = !!move;
+      const newAi = move ? applyPassive(latestAis[activeAi], move) : latestAis[activeAi];
 
       if (move) {
-        finalAI = doMark(midAI, move.color, move.idx);
-        const r = ROWS.find((x) => x.color === move.color);
-        addLog(turn + 1, `active(c): ${r.numbers[move.idx]} ${move.color}`);
-        setAiHL({ color: move.color, idx: move.idx });
+        const r = ROW_BY_COLOR[move.color];
+        addLog(turn + 1, `${aiLabel(activeAi, numAI)} active(w): ${r.numbers[move.idx]} ${move.color}`);
+        setAiHL({ aiIndex: activeAi, color: move.color, idx: move.idx });
         setPhase("ai_show");
         await new Promise((r) => setTimeout(r, 800));
         setAiHL(null);
-        setAiSt(finalAI);
-      } else if (!didW) {
-        finalAI = { ...midAI, penalties: midAI.penalties + 1 };
-        addLog(turn + 1, "active: skip(−5)");
-        setAiSt(finalAI);
+        const merged = [...latestAis];
+        merged[activeAi] = newAi;
+        setAiStates(merged);
+        latestAis = merged;
+      } else {
+        addLog(turn + 1, `${aiLabel(activeAi, numAI)} active(w): skip`);
       }
-
-      const sp = syncLocks(finalAI, latestP);
-      if (sp !== latestP) setPSt(sp);
+      const synced = syncLocksAll([latestHuman, ...latestAis]);
+      const newHuman = synced[0];
+      const newAis = synced.slice(1);
+      if (newHuman !== latestHuman) setHumanState(newHuman);
+      if (newAis.some((s, i) => s !== latestAis[i])) setAiStates(newAis);
       if (result.total > 0)
         setWinProb({
           aiWin: result.wins / result.total,
           draw: result.draws / result.total,
           humanWin: result.losses / result.total,
         });
-      if (isOver2(sp, finalAI)) {
+      if (isGameOver([newHuman, ...newAis])) {
+        endGame();
+        return null;
+      }
+      return { human: newHuman, ais: newAis };
+    },
+    [turn, numAI]
+  );
+
+  // ── Active AI color phase ──
+  const doActiveAiColor = useCallback(
+    async (activeAi: number, latestHuman: GameState, latestAis: GameState[]) => {
+      const s = cfgR.current;
+      const midAi = activeAiMidR.current || latestAis[activeAi];
+      const fd = activeAiDiceR.current;
+      if (!fd) {
+        nextTurn(latestHuman, latestAis);
+        return;
+      }
+      setPhase("ai_thinking");
+      const didW = activeAiPlayedWhiteR.current;
+      const opps = opponentsFor(activeAi, latestHuman, latestAis);
+      const result = await mctsColor(midAi, opps, fd, s.colorSims, s.ucbC, didW);
+      const move = result.move;
+      let finalAi = midAi;
+
+      if (move) {
+        finalAi = doMark(midAi, move.color, move.idx);
+        const r = ROW_BY_COLOR[move.color];
+        addLog(turn + 1, `${aiLabel(activeAi, numAI)} active(c): ${r.numbers[move.idx]} ${move.color}`);
+        setAiHL({ aiIndex: activeAi, color: move.color, idx: move.idx });
+        setPhase("ai_show");
+        await new Promise((r) => setTimeout(r, 800));
+        setAiHL(null);
+      } else if (!didW) {
+        finalAi = { ...midAi, penalties: midAi.penalties + 1 };
+        addLog(turn + 1, `${aiLabel(activeAi, numAI)} active: skip(−5)`);
+      }
+
+      const mergedAis = [...latestAis];
+      mergedAis[activeAi] = finalAi;
+      const synced = syncLocksAll([latestHuman, ...mergedAis]);
+      const newHuman = synced[0];
+      const newAis = synced.slice(1);
+      setAiStates(newAis);
+      if (newHuman !== latestHuman) setHumanState(newHuman);
+      if (result.total > 0)
+        setWinProb({
+          aiWin: result.wins / result.total,
+          draw: result.draws / result.total,
+          humanWin: result.losses / result.total,
+        });
+      if (isGameOver([newHuman, ...newAis])) {
         endGame();
         return;
       }
-      nextTurn(sp, finalAI);
+      activeAiMidR.current = null;
+      nextTurn(newHuman, newAis);
     },
-    [aiSt, turn, nextTurn]
+    [turn, numAI, nextTurn]
   );
 
-  const finishPassive = useCallback(
-    async (latestP: GameState) => {
-      const res = await revealAI(latestP, aiSt, "active(w)");
-      if (!res) return;
-      aiMidR.current = res.ai;
-      doAIColor(res.p);
+  // After the human plays their passive (or skips) on an AI's active turn:
+  // reveal active AI's white, then other AIs' passive, then active AI's color.
+  const finishAiActiveTurn = useCallback(
+    async (activeAi: number, latestHuman: GameState, latestAis: GameState[]) => {
+      const whiteRes = await revealActiveAiWhite(activeAi, latestHuman, latestAis);
+      if (!whiteRes) return;
+      activeAiMidR.current = whiteRes.ais[activeAi];
+      // Reveal each other AI's passive
+      const otherAis = whiteRes.ais.map((_, i) => i).filter((i) => i !== activeAi);
+      const passiveRes = await revealPassivesSequentially(otherAis, whiteRes.human, whiteRes.ais);
+      if (!passiveRes) return;
+      doActiveAiColor(activeAi, passiveRes.human, passiveRes.ais);
     },
-    [aiSt, revealAI, doAIColor]
+    [revealActiveAiWhite, revealPassivesSequentially, doActiveAiColor]
   );
 
+  // ── Human action handlers ──
   const handleMark = (c: Color, i: number) => {
     if (over) return;
     if (isWO(c, i)) {
-      const ns = doMark(pSt, c, i),
-        sa = syncLocks(ns, aiSt);
-      setPSt(ns);
-      if (sa !== aiSt) setAiSt(sa);
+      const newHuman = doMark(humanState, c, i);
+      const synced = syncLocksAll([newHuman, ...aiStates]);
+      const sHuman = synced[0];
+      const sAis = synced.slice(1);
+      setHumanState(sHuman);
+      setAiStates(sAis);
       setUsedW(true);
-      if (isOver2(ns, sa)) {
+      if (isGameOver([sHuman, ...sAis])) {
         endGame();
         return;
       }
-      revealAI(ns, sa, "passive", (sp, nai) => {
-        setPhase("p_color");
-        return { p: sp, ai: nai };
+      // Reveal each AI's passive move
+      const allAiIndices = sAis.map((_, idx) => idx);
+      revealPassivesSequentially(allAiIndices, sHuman, sAis).then((res) => {
+        if (res) setPhase("p_color");
       });
     } else if (isCO(c, i)) {
-      const ns = doMark(pSt, c, i),
-        sa = syncLocks(ns, aiSt);
-      setPSt(ns);
-      if (sa !== aiSt) setAiSt(sa);
+      const newHuman = doMark(humanState, c, i);
+      const synced = syncLocksAll([newHuman, ...aiStates]);
+      const sHuman = synced[0];
+      const sAis = synced.slice(1);
+      setHumanState(sHuman);
+      setAiStates(sAis);
       setUsedC(true);
-      if (isOver2(ns, sa)) {
+      if (isGameOver([sHuman, ...sAis])) {
         endGame();
         return;
       }
-      nextTurn(ns, sa);
+      nextTurn(sHuman, sAis);
     } else if (isPO(c, i)) {
-      const ns = doMark(pSt, c, i),
-        sa = syncLocks(ns, aiSt);
-      setPSt(ns);
-      if (sa !== aiSt) setAiSt(sa);
-      if (isOver2(ns, sa)) {
+      const newHuman = doMark(humanState, c, i);
+      const synced = syncLocksAll([newHuman, ...aiStates]);
+      const sHuman = synced[0];
+      const sAis = synced.slice(1);
+      setHumanState(sHuman);
+      setAiStates(sAis);
+      if (isGameOver([sHuman, ...sAis])) {
         endGame();
         return;
       }
-      finishPassive(ns);
+      if (activeAiIdx >= 0) finishAiActiveTurn(activeAiIdx, sHuman, sAis);
     }
   };
-  const skipW = () =>
-    revealAI(pSt, aiSt, "passive", (sp, nai) => {
-      setPhase("p_color");
-      return { p: sp, ai: nai };
+
+  const skipW = () => {
+    const allAiIndices = aiStates.map((_, idx) => idx);
+    revealPassivesSequentially(allAiIndices, humanState, aiStates).then((res) => {
+      if (res) setPhase("p_color");
     });
+  };
   const skipC = () => {
-    const ns: GameState = !usedW && !usedC ? { ...pSt, penalties: pSt.penalties + 1 } : pSt;
-    setPSt(ns);
-    if (isOver2(ns, aiSt)) {
+    const newHuman: GameState =
+      !usedW && !usedC ? { ...humanState, penalties: humanState.penalties + 1 } : humanState;
+    setHumanState(newHuman);
+    if (isGameOver([newHuman, ...aiStates])) {
       endGame();
       return;
     }
-    nextTurn(ns, aiSt);
+    nextTurn(newHuman, aiStates);
   };
-  const skipP = () => finishPassive(pSt);
+  const skipP = () => {
+    if (activeAiIdx >= 0) finishAiActiveTurn(activeAiIdx, humanState, aiStates);
+  };
 
   const handleRoll = useCallback(() => {
     if (rolling) return;
@@ -332,26 +477,26 @@ export default function Qwixx() {
         setDice(fd);
         setRollAnim(null);
         setRolling(false);
-        if (activePlayer === "human") startHuman(fd);
-        else startAITurn(fd);
+        if (isHumanActive) startHumanTurnMcts(fd);
+        else startAiTurnMcts(fd, activeAiIdx);
       }
     }, 80);
-  }, [activePlayer, rolling, startHuman, startAITurn]);
+  }, [isHumanActive, activeAiIdx, rolling, startHumanTurnMcts, startAiTurnMcts]);
 
   useEffect(() => {
-    if (phase === "roll" && activePlayer === "ai" && !rolling && !over && hasStarted.current) {
+    if (phase === "roll" && !isHumanActive && !rolling && !over && hasStarted.current) {
       const t = setTimeout(handleRoll, 600);
       return () => clearTimeout(t);
     }
     if (phase !== "roll") hasStarted.current = true;
-  }, [phase, activePlayer, rolling, over, handleRoll]);
+  }, [phase, isHumanActive, rolling, over, handleRoll]);
 
   const restart = () => {
-    setPSt(blank());
-    setAiSt(blank());
+    setHumanState(blank());
+    setAiStates(Array.from({ length: cfg.numAI }, blank));
     setDice(null);
     setPhase("roll");
-    setActivePlayer("human");
+    setActiveIdx(0);
     setUsedW(false);
     setUsedC(false);
     setRolling(false);
@@ -362,18 +507,20 @@ export default function Qwixx() {
     setWinProb(null);
     hasStarted.current = false;
     resetLive();
-    aiPendingR.current = null;
-    aiResultR.current = null;
-    aiDiceR.current = null;
-    aiMidR.current = null;
+    aiPendingR.current = Array.from<Promise<MctsResult> | null>({ length: cfg.numAI }).fill(null);
+    aiResultR.current = Array.from<MctsResult | null>({ length: cfg.numAI }).fill(null);
+    activeAiDiceR.current = null;
+    activeAiMidR.current = null;
+    activeAiPlayedWhiteR.current = false;
   };
 
-  const pi = (() => {
+  const activeLabel = isHumanActive ? "You" : aiLabel(activeAiIdx, numAI);
+  const phaseInfo = (() => {
     switch (phase) {
       case "roll":
         return {
-          text: isHA ? "Your turn — roll!" : "🤖 AI rolling...",
-          color: isHA ? "#34d399" : "#a78bfa",
+          text: isHumanActive ? "Your turn — roll!" : `🤖 ${activeLabel} rolling...`,
+          color: isHumanActive ? "#34d399" : "#a78bfa",
         };
       case "p_white":
         return { text: `White: mark ${ws} on any row`, color: "#fbbf24" };
@@ -394,181 +541,13 @@ export default function Qwixx() {
     }
   })();
 
-  /* ═══════════════════════════════════════════
-     RENDER — Row and Board inline but using memo'd Cell
-     ═══════════════════════════════════════════ */
-  const renderRow = (row: Row, state: GameState, isAI: boolean) => {
-    const lk = state.locked[row.color];
-    return (
-      <div
-        key={row.color}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 2,
-          background: lk ? "rgba(255,255,255,0.02)" : "rgba(255,255,255,0.04)",
-          borderRadius: 9,
-          padding: "3px 5px",
-          border: `1.5px solid ${lk ? "rgba(255,255,255,0.03)" : row.bg + "22"}`,
-          opacity: lk ? 0.35 : 1,
-        }}
-      >
-        <div
-          style={{ width: 5, minHeight: 28, borderRadius: 3, background: row.bg, flexShrink: 0 }}
-        />
-        <div style={{ display: "flex", gap: 1.5, flex: 1, justifyContent: "center" }}>
-          {row.numbers.map((num, idx) => {
-            const mk = state.marked[row.color][idx];
-            const hl = isAI && aiHL && aiHL.color === row.color && aiHL.idx === idx;
-            let opt = false,
-              prev = false;
-            if (!isAI) {
-              opt = isWO(row.color, idx) || isCO(row.color, idx) || isPO(row.color, idx);
-              if (!opt && !mk) prev = isCP(row.color, idx);
-            }
-            return (
-              <Cell
-                key={idx}
-                num={num}
-                idx={idx}
-                marked={mk}
-                opt={opt}
-                preview={prev}
-                hl={hl}
-                bg={row.bg}
-                bgLight={row.bgLight}
-                text={row.text}
-                locked={false}
-                onClick={() => !isAI && handleMark(row.color, idx)}
-              />
-            );
-          })}
-          {/* Lock cell */}
-          <div
-            style={{
-              width: 30,
-              height: 30,
-              borderRadius: 6,
-              fontSize: lk ? 13 : 10,
-              fontWeight: 700,
-              border: lk ? `2px solid ${row.bg}` : "1px dashed rgba(255,255,255,0.12)",
-              background: lk ? row.bg : "rgba(255,255,255,0.02)",
-              color: lk ? "#fff" : "rgba(255,255,255,0.2)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              fontFamily: "inherit",
-            }}
-          >
-            {lk ? "✕" : "🔒"}
-          </div>
-        </div>
-        <div
-          style={{
-            minWidth: 26,
-            textAlign: "center",
-            color: row.accent,
-            fontSize: 11,
-            fontWeight: 700,
-            background: "rgba(0,0,0,0.2)",
-            borderRadius: 5,
-            padding: "2px 1px",
-          }}
-        >
-          {SCORE_MAP[countX(state.marked[row.color]) + (state.marked[row.color][10] ? 1 : 0)] || 0}
-        </div>
-      </div>
-    );
-  };
-
-  const renderBoard = (state: GameState, label: string, isAI: boolean, active: boolean) => {
-    const ac = isAI ? "#8b5cf6" : "#22c55e",
-      al = isAI ? "rgba(139,92,246," : "rgba(34,197,94,";
-    return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 3,
-          width: "100%",
-          maxWidth: 540,
-          background: active ? `${al}0.08)` : "transparent",
-          borderRadius: 12,
-          padding: "6px 4px",
-          border: active ? `1px solid ${al}0.25)` : "1px solid rgba(255,255,255,0.04)",
-          borderLeft: active ? `3px solid ${ac}` : "3px solid transparent",
-          boxShadow: active ? `0 0 20px ${al}0.12)` : "none",
-          transition: "all 0.4s",
-          opacity: active ? 1 : 0.6,
-          transform: active ? "scale(1)" : "scale(0.985)",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "0 6px",
-            marginBottom: 1,
-          }}
-        >
-          <span
-            style={{
-              color: isAI ? "#a78bfa" : "#34d399",
-              fontSize: 13,
-              fontWeight: 700,
-              display: "flex",
-              alignItems: "center",
-              gap: 6,
-            }}
-          >
-            {isAI ? "🤖" : "👤"} {label}
-            {active && (
-              <span
-                style={{
-                  fontSize: 8,
-                  color: ac,
-                  fontWeight: 600,
-                  background: `${al}0.15)`,
-                  padding: "1px 6px",
-                  borderRadius: 8,
-                  animation: "subtlePulse 2s ease-in-out infinite",
-                }}
-              >
-                ACTIVE
-              </span>
-            )}
-          </span>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#64748b", fontSize: 10 }}>
-              {[0, 1, 2, 3].map((i) => (
-                <span
-                  key={i}
-                  style={{
-                    display: "inline-block",
-                    width: 14,
-                    height: 14,
-                    lineHeight: "14px",
-                    textAlign: "center",
-                    borderRadius: 3,
-                    marginLeft: 2,
-                    fontSize: 9,
-                    background: i < state.penalties ? "#EF4444" : "rgba(255,255,255,0.06)",
-                    color: i < state.penalties ? "#fff" : "#475569",
-                    fontWeight: 700,
-                  }}
-                >
-                  {i < state.penalties ? "✕" : ""}
-                </span>
-              ))}
-            </span>
-            <span style={{ color: "#fff", fontSize: 14, fontWeight: 800 }}>{score(state)}</span>
-          </div>
-        </div>
-        {ROWS.map((row) => renderRow(row, state, isAI))}
-      </div>
-    );
-  };
+  const gameOverResults = useMemo(
+    () => [
+      { label: "You", score: humanScore, isHuman: true },
+      ...aiStates.map((s, i) => ({ label: aiLabel(i, numAI), score: score(s), isHuman: false })),
+    ],
+    [humanScore, aiStates, numAI]
+  );
 
   return (
     <div
@@ -653,299 +632,12 @@ export default function Qwixx() {
         </div>
       </div>
 
-      {showCfg && (
-        <div
-          style={{
-            background: "rgba(139,92,246,0.08)",
-            borderRadius: 10,
-            padding: 14,
-            maxWidth: 480,
-            marginBottom: 10,
-            color: "#cbd5e1",
-            fontSize: 11,
-            lineHeight: 1.8,
-            border: "1px solid rgba(139,92,246,0.2)",
-            width: "100%",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              alignItems: "center",
-              marginBottom: 8,
-            }}
-          >
-            <span style={{ color: "#c4b5fd", fontWeight: 700, fontSize: 12 }}>
-              ⚙️ MCTS Settings
-            </span>
-            <span style={{ color: "#64748b", fontSize: 9, fontFamily: "monospace" }}>
-              v{__APP_VERSION__}
-            </span>
-          </div>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              marginBottom: 8,
-              padding: "6px 0",
-              borderBottom: "1px solid rgba(255,255,255,0.08)",
-            }}
-          >
-            <div style={{ flex: 1, fontSize: 10 }}>
-              <div style={{ color: "#e2e8f0", fontWeight: 600 }}>Manual mode</div>
-              <div style={{ color: "#64748b", fontSize: 9 }}>
-                No color preview hints during white phase
-              </div>
-            </div>
-            <button
-              onClick={() => setCfg({ ...cfg, manual: !cfg.manual })}
-              style={{
-                width: 44,
-                height: 24,
-                borderRadius: 12,
-                border: "none",
-                cursor: "pointer",
-                background: cfg.manual ? "#8b5cf6" : "rgba(255,255,255,0.15)",
-                position: "relative",
-                transition: "background 0.2s",
-              }}
-            >
-              <div
-                style={{
-                  width: 18,
-                  height: 18,
-                  borderRadius: 9,
-                  background: "#fff",
-                  position: "absolute",
-                  top: 3,
-                  left: cfg.manual ? 23 : 3,
-                  transition: "left 0.2s",
-                }}
-              />
-            </button>
-          </div>
-          <Slider
-            label="Active sims"
-            desc="White phase sims"
-            value={cfg.activeSims}
-            min={500}
-            max={50000}
-            step={500}
-            onChange={(v) => setCfg({ ...cfg, activeSims: v })}
-          />
-          <Slider
-            label="Color sims"
-            desc="Color phase sims"
-            value={cfg.colorSims}
-            min={500}
-            max={50000}
-            step={500}
-            onChange={(v) => setCfg({ ...cfg, colorSims: v })}
-          />
-          <Slider
-            label="Passive sims"
-            desc="Passive phase sims"
-            value={cfg.passiveSims}
-            min={500}
-            max={20000}
-            step={500}
-            onChange={(v) => setCfg({ ...cfg, passiveSims: v })}
-          />
-          <Slider
-            label="UCB-C"
-            desc="Exploration (higher = more)"
-            value={cfg.ucbC}
-            min={0.5}
-            max={5}
-            step={0.1}
-            onChange={(v) => setCfg({ ...cfg, ucbC: v })}
-          />
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <button
-              onClick={() => setCfg({ ...cfg, ...PRESETS.defaults })}
-              style={{
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                color: "#94a3b8",
-                borderRadius: 8,
-                padding: "3px 10px",
-                fontSize: 9,
-                cursor: "pointer",
-                fontFamily: "inherit",
-              }}
-            >
-              Defaults
-            </button>
-            <button
-              onClick={() => setCfg({ ...cfg, ...PRESETS.max })}
-              style={{
-                background: "rgba(239,68,68,0.12)",
-                border: "1px solid rgba(239,68,68,0.2)",
-                color: "#f87171",
-                borderRadius: 8,
-                padding: "3px 10px",
-                fontSize: 9,
-                cursor: "pointer",
-                fontFamily: "inherit",
-              }}
-            >
-              🔥 Max
-            </button>
-            <button
-              onClick={() => setCfg({ ...cfg, ...PRESETS.easy })}
-              style={{
-                background: "rgba(34,197,94,0.12)",
-                border: "1px solid rgba(34,197,94,0.2)",
-                color: "#34d399",
-                borderRadius: 8,
-                padding: "3px 10px",
-                fontSize: 9,
-                cursor: "pointer",
-                fontFamily: "inherit",
-              }}
-            >
-              😴 Easy
-            </button>
-          </div>
-        </div>
-      )}
-
-      {showRules && (
-        <div
-          style={{
-            background: "rgba(255,255,255,0.07)",
-            borderRadius: 10,
-            padding: 12,
-            maxWidth: 480,
-            marginBottom: 10,
-            color: "#cbd5e1",
-            fontSize: 11,
-            lineHeight: 1.5,
-            border: "1px solid rgba(255,255,255,0.1)",
-          }}
-        >
-          <p style={{ margin: "0 0 5px" }}>
-            <strong style={{ color: "#fff" }}>Active turn:</strong> Roll → ALL players may use white
-            sum → only active player may also use white+color combo. Penalty if active player marks
-            nothing.
-          </p>
-          <p style={{ margin: "0 0 5px" }}>
-            <strong style={{ color: "#fff" }}>Passive:</strong> When the AI rolls, you still get to
-            use the white dice sum!
-          </p>
-          <p style={{ margin: "0 0 5px" }}>
-            <strong style={{ color: "#fff" }}>Rules:</strong> Left→right only. 5+ marks to lock last
-            number. Locking adds a bonus ✕ to scoring. Locks apply to both players. Game ends: 2
-            locked rows or 4 penalties.
-          </p>
-          <p style={{ margin: 0 }}>
-            <strong style={{ color: "#fff" }}>Scoring:</strong> 1✕=1, 2✕=3, 3✕=6, 4✕=10, 5✕=15,
-            6✕=21, 7✕=28, 8✕=36, 9✕=45, 10✕=55, 11✕=66, 12✕=78
-          </p>
-        </div>
-      )}
+      {showCfg && <MctsSettingsPanel cfg={cfg} onChange={setCfg} currentGameNumAI={numAI} />}
+      {showRules && <RulesPanel />}
 
       <div style={{ marginBottom: 8, width: "100%", maxWidth: 400 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            background: "rgba(255,255,255,0.05)",
-            borderRadius: 8,
-            padding: "5px 14px",
-            border: "1px solid rgba(255,255,255,0.08)",
-          }}
-        >
-          <span style={{ color: "#34d399", fontWeight: 700, fontSize: 14 }}>👤{pSc}</span>
-          <div
-            style={{
-              flex: 1,
-              height: 5,
-              background: "rgba(255,255,255,0.08)",
-              borderRadius: 3,
-              overflow: "hidden",
-              display: "flex",
-            }}
-          >
-            <div
-              style={{
-                width: `${pSc + aSc > 0 ? (pSc / (pSc + aSc)) * 100 : 50}%`,
-                background: "linear-gradient(90deg,#34d399,#22c55e)",
-                borderRadius: 3,
-                transition: "width 0.5s",
-              }}
-            />
-            <div
-              style={{
-                flex: 1,
-                background: "linear-gradient(90deg,#8b5cf6,#a78bfa)",
-                borderRadius: 3,
-              }}
-            />
-          </div>
-          <span style={{ color: "#a78bfa", fontWeight: 700, fontSize: 14 }}>{aSc}🤖</span>
-        </div>
-        {winProb && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 4,
-              marginTop: 4,
-              padding: "0 4px",
-            }}
-          >
-            <span style={{ color: "#34d399", fontSize: 9, fontWeight: 600, minWidth: 36 }}>
-              {Math.round(winProb.humanWin * 100)}%
-            </span>
-            <div
-              style={{
-                flex: 1,
-                height: 4,
-                borderRadius: 2,
-                overflow: "hidden",
-                display: "flex",
-                background: "rgba(255,255,255,0.06)",
-              }}
-            >
-              <div
-                style={{
-                  width: `${winProb.humanWin * 100}%`,
-                  background: "#22c55e",
-                  transition: "width 0.3s ease",
-                }}
-              />
-              <div
-                style={{
-                  width: `${winProb.draw * 100}%`,
-                  background: "#64748b",
-                  transition: "width 0.3s ease",
-                }}
-              />
-              <div
-                style={{
-                  width: `${winProb.aiWin * 100}%`,
-                  background: "#8b5cf6",
-                  transition: "width 0.3s ease",
-                }}
-              />
-            </div>
-            <span
-              style={{
-                color: "#a78bfa",
-                fontSize: 9,
-                fontWeight: 600,
-                minWidth: 36,
-                textAlign: "right",
-              }}
-            >
-              {Math.round(winProb.aiWin * 100)}%
-            </span>
-          </div>
-        )}
+        <ScoreBar humanScore={humanScore} leadingAiScore={leadingAiScore} />
+        {winProb && <WinProbBar prob={winProb} />}
       </div>
 
       <div
@@ -961,15 +653,15 @@ export default function Qwixx() {
           gap: 6,
         }}
       >
-        {dd ? (
+        {displayedDice ? (
           <>
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap", justifyContent: "center" }}>
-              <Die value={dd.w1} bg="#78716c" spin={rolling} />
-              <Die value={dd.w2} bg="#78716c" spin={rolling} />
-              <Die value={dd.red} bg="#DC2626" spin={rolling} />
-              <Die value={dd.yellow} bg="#CA8A04" spin={rolling} />
-              <Die value={dd.green} bg="#16A34A" spin={rolling} />
-              <Die value={dd.blue} bg="#2563EB" spin={rolling} />
+              <Die value={displayedDice.w1} bg="#78716c" spin={rolling} />
+              <Die value={displayedDice.w2} bg="#78716c" spin={rolling} />
+              <Die value={displayedDice.red} bg="#DC2626" spin={rolling} />
+              <Die value={displayedDice.yellow} bg="#CA8A04" spin={rolling} />
+              <Die value={displayedDice.green} bg="#16A34A" spin={rolling} />
+              <Die value={displayedDice.blue} bg="#2563EB" spin={rolling} />
             </div>
             {!rolling && dice && (
               <div style={{ color: "#94a3b8", fontSize: 10 }}>
@@ -979,7 +671,7 @@ export default function Qwixx() {
           </>
         ) : (
           <div style={{ color: "#64748b", fontSize: 12 }}>
-            {turn === 0 ? "Roll to start!" : isHA ? "Your turn — roll!" : "AI's turn..."}
+            {turn === 0 ? "Roll to start!" : isHumanActive ? "Your turn — roll!" : `${activeLabel}'s turn...`}
           </div>
         )}
         <div
@@ -991,7 +683,7 @@ export default function Qwixx() {
             alignItems: "center",
           }}
         >
-          {phase === "roll" && !over && isHA && (
+          {phase === "roll" && !over && isHumanActive && (
             <button
               onClick={handleRoll}
               disabled={rolling}
@@ -1018,13 +710,13 @@ export default function Qwixx() {
                 background: "rgba(255,255,255,0.1)",
                 borderRadius: 6,
                 padding: "4px 10px",
-                color: pi.color,
+                color: phaseInfo.color,
                 fontSize: 11,
                 fontWeight: 600,
                 animation: phase === "ai_thinking" ? "throb 1s infinite" : "none",
               }}
             >
-              {pi.text}
+              {phaseInfo.text}
             </div>
           )}
           {phase === "p_white" && (
@@ -1081,7 +773,16 @@ export default function Qwixx() {
         </div>
       </div>
 
-      {renderBoard(pSt, "You", false, isHA && phase !== "roll" && phase !== "done")}
+      <Board
+        state={humanState}
+        label="You"
+        isAI={false}
+        active={isHumanActive && phase !== "roll" && phase !== "done"}
+        highlight={null}
+        onCellClick={handleMark}
+        isOption={humanIsOption}
+        isPreview={humanIsPreview}
+      />
       <div
         style={{
           width: "80%",
@@ -1091,79 +792,35 @@ export default function Qwixx() {
           margin: "6px 0",
         }}
       />
-      {renderBoard(aiSt, "MCTS AI", true, !isHA && phase !== "roll" && phase !== "done")}
-
-      {aiLog.length > 0 && (
-        <div
-          style={{
-            marginTop: 6,
-            width: "100%",
-            maxWidth: 540,
-            background: "rgba(139,92,246,0.05)",
-            borderRadius: 8,
-            padding: "6px 10px",
-            border: "1px solid rgba(139,92,246,0.1)",
-          }}
-        >
-          <div style={{ color: "#a78bfa", fontSize: 10, fontWeight: 700, marginBottom: 2 }}>
-            🤖 AI log
-          </div>
-          {aiLog.map((e, i) => (
-            <div key={i} style={{ color: "#94a3b8", fontSize: 10, lineHeight: 1.4 }}>
-              {e}
-            </div>
-          ))}
+      {aiStates.map((aiSt, i) => (
+        <div key={i} style={{ width: "100%", display: "flex", justifyContent: "center" }}>
+          <Board
+            state={aiSt}
+            label={aiLabel(i, numAI)}
+            isAI={true}
+            active={activeAiIdx === i && phase !== "roll" && phase !== "done"}
+            highlight={aiHL && aiHL.aiIndex === i ? { color: aiHL.color, idx: aiHL.idx } : null}
+            onCellClick={null}
+            isOption={null}
+            isPreview={null}
+          />
+          {i < aiStates.length - 1 && (
+            <div
+              style={{
+                width: "80%",
+                maxWidth: 400,
+                height: 1,
+                background: "rgba(255,255,255,0.08)",
+                margin: "6px 0",
+              }}
+            />
+          )}
         </div>
-      )}
+      ))}
 
-      {over && (
-        <div
-          style={{
-            marginTop: 12,
-            textAlign: "center",
-            background:
-              pSc > aSc
-                ? "rgba(34,197,94,0.1)"
-                : pSc < aSc
-                  ? "rgba(139,92,246,0.1)"
-                  : "rgba(255,255,255,0.06)",
-            borderRadius: 12,
-            padding: 16,
-            border: `1px solid ${pSc > aSc ? "rgba(34,197,94,0.25)" : pSc < aSc ? "rgba(139,92,246,0.25)" : "rgba(255,255,255,0.15)"}`,
-          }}
-        >
-          <div
-            style={{
-              fontSize: 20,
-              fontWeight: 700,
-              marginBottom: 4,
-              color: pSc > aSc ? "#34d399" : pSc < aSc ? "#c4b5fd" : "#fff",
-            }}
-          >
-            {pSc > aSc ? "You Win! 🎉" : pSc < aSc ? "AI Wins! 🤖" : "Tie!"}
-          </div>
-          <div style={{ color: "#cbd5e1", fontSize: 13, marginBottom: 8 }}>
-            You: {pSc} — AI: {aSc}
-          </div>
-          <button
-            onClick={restart}
-            style={{
-              background: "linear-gradient(135deg,#8B5CF6,#6D28D9)",
-              color: "#fff",
-              border: "none",
-              borderRadius: 9,
-              padding: "7px 20px",
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: "pointer",
-              fontFamily: "inherit",
-              boxShadow: "0 3px 12px rgba(139,92,246,0.4)",
-            }}
-          >
-            Play Again
-          </button>
-        </div>
-      )}
+      <AiLog entries={aiLog} />
+
+      {over && <GameOverBanner results={gameOverResults} onRestart={restart} />}
 
       <style>{`
         @keyframes pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.07)}}
