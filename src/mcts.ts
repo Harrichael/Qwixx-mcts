@@ -54,7 +54,7 @@ function maxPot(s: GameState): number {
   let t = 0;
   COLORS.forEach((c) => {
     if (s.locked[c]) {
-      t += SCORE_MAP[countX(s.marked[c]) + 1] || 0;
+      t += SCORE_MAP[countX(s.marked[c]) + (s.marked[c][10] ? 1 : 0)] || 0;
       return;
     }
     const m = countX(s.marked[c]);

@@ -475,7 +475,7 @@ export default function Qwixx() {
             padding: "2px 1px",
           }}
         >
-          {SCORE_MAP[countX(state.marked[row.color]) + (state.locked[row.color] ? 1 : 0)] || 0}
+          {SCORE_MAP[countX(state.marked[row.color]) + (state.marked[row.color][10] ? 1 : 0)] || 0}
         </div>
       </div>
     );

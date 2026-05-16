@@ -46,7 +46,7 @@ export function score(s: GameState): number {
   let t = 0;
   COLORS.forEach((c) => {
     let n = countX(s.marked[c]);
-    if (s.locked[c]) n++;
+    if (s.marked[c][10]) n++;
     t += SCORE_MAP[n] || 0;
   });
   return t + s.penalties * PENALTY_PTS;
