@@ -16,6 +16,7 @@ interface BoardRowProps {
 const BoardRow = memo(
   ({ row, state, highlight, onCellClick, isOption, isPreview }: BoardRowProps) => {
     const locked = state.locked[row.color];
+    const gotFinalNumber = state.marked[row.color][10];
     return (
       <div
         style={{
@@ -60,18 +61,20 @@ const BoardRow = memo(
               width: 30,
               height: 30,
               borderRadius: 6,
-              fontSize: locked ? 13 : 10,
+              fontSize: gotFinalNumber ? 13 : 10,
               fontWeight: 700,
-              border: locked ? `2px solid ${row.bg}` : "1px dashed rgba(255,255,255,0.12)",
-              background: locked ? row.bg : "rgba(255,255,255,0.02)",
-              color: locked ? "#fff" : "rgba(255,255,255,0.2)",
+              border: gotFinalNumber
+                ? `2px solid ${row.bg}`
+                : "1px dashed rgba(255,255,255,0.12)",
+              background: gotFinalNumber ? row.bg : "rgba(255,255,255,0.02)",
+              color: gotFinalNumber ? "#fff" : "rgba(255,255,255,0.2)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               fontFamily: "inherit",
             }}
           >
-            {locked ? "✕" : "🔒"}
+            {gotFinalNumber ? "✕" : "🔒"}
           </div>
         </div>
         <div

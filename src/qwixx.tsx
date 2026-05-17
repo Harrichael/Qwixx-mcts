@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { Fragment, useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { ROW_BY_COLOR, rollAll } from "./constants";
 import { blank, doMark, score, isGameOver, canMark, syncLocksAll } from "./game";
 import { liveStats, resetLive, applyPassive, mctsPassive, mctsWhite, mctsColor } from "./mcts";
@@ -793,7 +793,7 @@ export default function Qwixx() {
         }}
       />
       {aiStates.map((aiSt, i) => (
-        <div key={i} style={{ width: "100%", display: "flex", justifyContent: "center" }}>
+        <Fragment key={i}>
           <Board
             state={aiSt}
             label={aiLabel(i, numAI)}
@@ -815,7 +815,7 @@ export default function Qwixx() {
               }}
             />
           )}
-        </div>
+        </Fragment>
       ))}
 
       <AiLog entries={aiLog} />
